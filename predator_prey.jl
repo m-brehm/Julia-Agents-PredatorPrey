@@ -51,12 +51,27 @@ using CairoMakie
     energy::Float64
     reproduction_prob::Float64
     Δenergy::Float64
-    #perception::Int32
+    perception::Int32
+    nearby_agents
+    nearby_grass
     #speed::Float64
     #endurance::Float64
 end
+function perceive!(sheep::Sheep,model)
+    sheep.nearby_agents = nearby_agents(sheep, model, sheep.perception)
+    sheep.nearby_grass = nearby_fully_grown(sheep, model)
+end
 function move!(sheep::Sheep,model)
-    randomwalk!(sheep, model)
+    wolves = filter(x -> isa(x, Wolf), collect(sheep.nearby_agents))
+    if !isempty(wolves)
+        closest_wolf = findmin(wolf -> sqrt(sum((sheep.pos .- wolf.pos) .^ 2)), wolves)[2]
+        move_away!(sheep, wolves[closest_wolf].pos, model)
+    elseif !isempty(sheep.nearby_grass)
+        pos = random_empty_fully_grown(sheep.nearby_grass, model)
+        move_towards!(sheep, pos, model)
+    else
+        randomwalk!(sheep, model)
+    end
     sheep.energy -= 1
 end
 function eat!(sheep::Sheep, model)
@@ -72,17 +87,51 @@ function reproduce!(sheep::Sheep, model)
         replicate!(sheep, model)
     end
 end
+function move_away!(agent, pos, model)
+    direction = agent.pos .- pos
+    direction = clamp.(direction,-1,1)
+    walk!(agent,direction,model)
+end
+function move_towards!(agent, pos, model; ifempty=true)
+    direction = pos .- agent.pos
+    direction = clamp.(direction,-1,1)
+    walk!(agent,direction,model; ifempty=ifempty)
+end
+function nearby_fully_grown(sheep::Sheep, model)
+    nearby_pos = nearby_positions(sheep.pos, model, sheep.perception)
+    fully_grown_positions = filter(x -> model.fully_grown[x...], collect(nearby_pos))
+    return fully_grown_positions
+end
+function random_empty_fully_grown(positions, model)
+    n_attempts = 2*length(positions)
+    while n_attempts != 0
+        pos_choice = rand(positions)
+        isempty(pos_choice, model) && return pos_choice
+        n_attempts -= 1
+    end
+    return positions[1]
+end
 
 @agent struct Wolf(GridAgent{2})
     energy::Float64
     reproduction_prob::Float64
     Δenergy::Float64
-    #perception::Int32
+    perception::Int32
+    nearby_agents
     #speed::Float64
     #endurance::Float64
 end
+function perceive!(wolf::Wolf,model)
+    wolf.nearby_agents = nearby_agents(wolf, model, wolf.perception)
+end
 function move!(wolf::Wolf,model)
-    randomwalk!(wolf, model; ifempty=false)
+    sheeps = filter(x -> isa(x, Sheep), collect(wolf.nearby_agents))
+    if !isempty(sheeps)
+        closest_sheep = findmin(sheep -> sqrt(sum((wolf.pos .- sheep.pos) .^ 2)), sheeps)[2]
+        move_towards!(wolf, sheeps[closest_sheep].pos, model; ifempty=false)
+    else
+        randomwalk!(wolf, model; ifempty=false)
+    end
     wolf.energy -= 1
 end
 function eat!(wolf::Wolf, model)
@@ -139,11 +188,11 @@ function initialize_model(;
     ## Add agents
     for _ in 1:n_sheep
         energy = rand(abmrng(model), 1:(Δenergy_sheep*2)) - 1
-        add_agent!(Sheep, model, energy, sheep_reproduce, Δenergy_sheep)
+        add_agent!(Sheep, model, energy, sheep_reproduce, Δenergy_sheep, 3, [], [])
     end
     for _ in 1:n_wolves
         energy = rand(abmrng(model), 1:(Δenergy_wolf*2)) - 1
-        add_agent!(Wolf, model, energy, wolf_reproduce, Δenergy_wolf)
+        add_agent!(Wolf, model, energy, wolf_reproduce, Δenergy_wolf, 1, [])
     end
     ## Add grass with random initial growth
     for p in positions(model)
@@ -165,6 +214,7 @@ end
 # Notice how the function `sheepwolf_step!`, which is our `agent_step!`,
 # is dispatched to the appropriate agent type via Julia's Multiple Dispatch system.
 function sheepwolf_step!(sheep::Sheep, model)
+    perceive!(sheep, model)
     move!(sheep, model)
     if sheep.energy < 0
         remove_agent!(sheep, model)
@@ -175,6 +225,7 @@ function sheepwolf_step!(sheep::Sheep, model)
 end
 
 function sheepwolf_step!(wolf::Wolf, model)
+    perceive!(wolf, model)
     move!(wolf, model)
     if wolf.energy < 0
         remove_agent!(wolf, model)
@@ -199,111 +250,3 @@ function grass_step!(model)
         end
     end
 end
-
-function run()
-    sheepwolfgrass = initialize_model()
-
-    # ## Running the model
-    # %% #src
-    # We will run the model for 500 steps and record the number of sheep, wolves and consumable
-    # grass patches after each step. First: initialize the model.
-
-    CairoMakie.activate!() # hide
-
-    # To view our starting population, we can build an overview plot using [`abmplot`](@ref).
-    # We define the plotting details for the wolves and sheep:
-    offset(a) = a isa Sheep ? (-0.1, -0.1*rand()) : (+0.1, +0.1*rand())
-    ashape(a) = a isa Sheep ? :circle : :utriangle
-    acolor(a) = a isa Sheep ? RGBAf(1.0, 1.0, 1.0, 0.8) : RGBAf(0.2, 0.2, 0.3, 0.8)
-
-    # and instruct [`abmplot`](@ref) how to plot grass as a heatmap:
-    grasscolor(model) = model.countdown ./ model.regrowth_time
-    # and finally define a colormap for the grass:
-    heatkwargs = (colormap = [:brown, :green], colorrange = (0, 1))
-
-    # and put everything together and give it to [`abmplot`](@ref)
-    plotkwargs = (;
-        agent_color = acolor,
-        agent_size = 25,
-        agent_marker = ashape,
-        offset,
-        agentsplotkwargs = (strokewidth = 1.0, strokecolor = :black),
-        heatarray = grasscolor,
-        heatkwargs = heatkwargs,
-    )
-
-    sheepwolfgrass = initialize_model()
-
-    fig, ax, abmobs = abmplot(sheepwolfgrass; plotkwargs...)
-    fig
-
-    # Now, lets run the simulation and collect some data. Define datacollection:
-    sheep(a) = a isa Sheep
-    wolf(a) = a isa Wolf
-    count_grass(model) = count(model.fully_grown)
-    # Run simulation:
-    sheepwolfgrass = initialize_model()
-    steps = 1000
-    adata = [(sheep, count), (wolf, count)]
-    mdata = [count_grass]
-    adf, mdf = run!(sheepwolfgrass, steps; adata, mdata)
-
-    # The following plot shows the population dynamics over time.
-    # Initially, wolves become extinct because they consume the sheep too quickly.
-    # The few remaining sheep reproduce and gradually reach an
-    # equilibrium that can be supported by the amount of available grass.
-    function plot_population_timeseries(adf, mdf)
-        figure = Figure(size = (600, 400))
-        ax = figure[1, 1] = Axis(figure; xlabel = "Step", ylabel = "Population")
-        sheepl = lines!(ax, adf.time, adf.count_sheep, color = :cornsilk4)
-        wolfl = lines!(ax, adf.time, adf.count_wolf, color = RGBAf(0.2, 0.2, 0.3))
-        grassl = lines!(ax, mdf.time, mdf.count_grass, color = :green)
-        figure[1, 2] = Legend(figure, [sheepl, wolfl, grassl], ["Sheep", "Wolves", "Grass"])
-        figure
-    end
-
-    plot_population_timeseries(adf, mdf)
-
-    # Altering the input conditions, we now see a landscape where sheep, wolves and grass
-    # find an equilibrium
-    # %% #src
-    stable_params = (;
-        n_sheep = 140,
-        n_wolves = 20,
-        dims = (30, 30),
-        Δenergy_sheep = 5,
-        sheep_reproduce = 0.31,
-        wolf_reproduce = 0.06,
-        Δenergy_wolf = 30,
-        seed = 71758,
-    )
-
-    sheepwolfgrass = initialize_model(;stable_params...)
-    adf, mdf = run!(sheepwolfgrass, 2000; adata, mdata)
-    plot_population_timeseries(adf, mdf)
-
-    # Finding a parameter combination that leads to long-term coexistence was
-    # surprisingly difficult. It is for such cases that the
-    # [Optimizing agent based models](@ref) example is useful!
-    # %% #src
-
-    # ## Video
-    # Given that we have defined plotting functions, making a video is as simple as
-    sheepwolfgrass = initialize_model(;stable_params...)
-
-    abmvideo(
-        "sheepwolf.mp4",
-        sheepwolfgrass;
-        frames = 100,
-        framerate = 8,
-        title = "Sheep Wolf Grass",
-        plotkwargs...,
-    )
-
-    # ```@raw html
-    # <video width="auto" controls autoplay loop>
-    # <source src="../sheepwolf.mp4" type="video/mp4">
-    # </video>
-    # ```
-end
-run()
