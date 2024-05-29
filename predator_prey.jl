@@ -46,7 +46,6 @@
 # example, we could have only one type and one additional filed to separate them.
 # Nevertheless, for the sake of example, we will use two different types.)
 using Agents, Random
-using CairoMakie
 @agent struct Sheep(GridAgent{2})
     energy::Float64
     reproduction_prob::Float64
@@ -58,7 +57,7 @@ using CairoMakie
     #endurance::Float64
 end
 function perceive!(sheep::Sheep,model)
-    sheep.nearby_agents = nearby_agents(sheep, model, sheep.perception)
+    sheep.nearby_agents = nearby_agents(sheep, model, model.sheep_perception)#sheep.perception)
     sheep.nearby_grass = nearby_fully_grown(sheep, model)
 end
 function move!(sheep::Sheep,model)
@@ -76,17 +75,27 @@ function move!(sheep::Sheep,model)
 end
 function eat!(sheep::Sheep, model)
     if model.fully_grown[sheep.pos...]
-        sheep.energy += sheep.Δenergy
+        sheep.energy += model.Δenergy_sheep#sheep.Δenergy
         model.fully_grown[sheep.pos...] = false
     end
     return
 end
 function reproduce!(sheep::Sheep, model)
-    if rand(abmrng(model)) ≤ sheep.reproduction_prob
+    print(model.sheep_reproduce)
+    if rand(abmrng(model)) ≤ model.sheep_reproduce#sheep.reproduction_prob
         sheep.energy /= 2
         replicate!(sheep, model)
     end
 end
+
+function Agents.agent2string(agent::Sheep)
+    """
+    Sheep
+    ID = $(agent.id)
+    energy = $(agent.energy)
+    """
+end
+
 function move_away!(agent, pos, model)
     direction = agent.pos .- pos
     direction = clamp.(direction,-1,1)
@@ -122,7 +131,7 @@ end
     #endurance::Float64
 end
 function perceive!(wolf::Wolf,model)
-    wolf.nearby_agents = nearby_agents(wolf, model, wolf.perception)
+    wolf.nearby_agents = nearby_agents(wolf, model, model.wolf_perception)#wolf.perception)
 end
 function move!(wolf::Wolf,model)
     sheeps = filter(x -> isa(x, Sheep), collect(wolf.nearby_agents))
@@ -138,14 +147,22 @@ function eat!(wolf::Wolf, model)
     dinner = first_sheep_in_position(wolf.pos, model)
     if !isnothing(dinner)
         remove_agent!(dinner, model)
-        wolf.energy += wolf.Δenergy
+        wolf.energy += model.Δenergy_wolf#wolf.Δenergy
     end
 end
 function reproduce!(wolf::Wolf, model)
-    if rand(abmrng(model)) ≤ wolf.reproduction_prob
+    if rand(abmrng(model)) ≤ model.wolf_reproduce#wolf.reproduction_prob
         wolf.energy /= 2
         replicate!(wolf, model)
     end
+end
+
+function Agents.agent2string(agent::Wolf)
+    """
+    Wolf
+    ID = $(agent.id)
+    energy = $(agent.energy)
+    """
 end
 
 function first_sheep_in_position(pos, model)
@@ -168,18 +185,26 @@ function initialize_model(;
         Δenergy_wolf = 20,
         sheep_reproduce = 0.04,
         wolf_reproduce = 0.05,
+        sheep_perception = 0,
+        wolf_perception = 0,
         seed = 23182,
     )
-
     rng = MersenneTwister(seed)
     space = GridSpace(dims, periodic = true)
     ## Model properties contain the grass as two arrays: whether it is fully grown
     ## and the time to regrow. Also have static parameter `regrowth_time`.
     ## Notice how the properties are a `NamedTuple` to ensure type stability.
-    properties = (
-        fully_grown = falses(dims),
-        countdown = zeros(Int, dims),
-        regrowth_time = regrowth_time,
+    ## define as dictionary(mutable) instead of tuples(immutable) as per https://github.com/JuliaDynamics/Agents.jl/issues/727
+    properties = Dict(
+        :fully_grown => falses(dims),
+        :countdown => zeros(Int, dims),
+        :regrowth_time => regrowth_time,
+        :Δenergy_sheep => Δenergy_sheep,
+        :Δenergy_wolf => Δenergy_wolf,
+        :sheep_reproduce => sheep_reproduce,
+        :wolf_reproduce => wolf_reproduce,
+        :sheep_perception => sheep_perception,
+        :wolf_perception => wolf_perception
     )
     model = StandardABM(Union{Sheep, Wolf}, space; 
         agent_step! = sheepwolf_step!, model_step! = grass_step!,
@@ -188,11 +213,11 @@ function initialize_model(;
     ## Add agents
     for _ in 1:n_sheep
         energy = rand(abmrng(model), 1:(Δenergy_sheep*2)) - 1
-        add_agent!(Sheep, model, energy, sheep_reproduce, Δenergy_sheep, 3, [], [])
+        add_agent!(Sheep, model, energy, sheep_reproduce, Δenergy_sheep, sheep_perception, [], [])
     end
     for _ in 1:n_wolves
         energy = rand(abmrng(model), 1:(Δenergy_wolf*2)) - 1
-        add_agent!(Wolf, model, energy, wolf_reproduce, Δenergy_wolf, 1, [])
+        add_agent!(Wolf, model, energy, wolf_reproduce, Δenergy_wolf, wolf_perception, [])
     end
     ## Add grass with random initial growth
     for p in positions(model)
