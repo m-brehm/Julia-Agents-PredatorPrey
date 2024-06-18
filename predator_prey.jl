@@ -177,6 +177,7 @@ end
 # directions.
 
 function initialize_model(;
+        events = [],
         n_sheep = 100,
         n_wolves = 50,
         dims = (20, 20),
@@ -196,6 +197,7 @@ function initialize_model(;
     ## Notice how the properties are a `NamedTuple` to ensure type stability.
     ## define as dictionary(mutable) instead of tuples(immutable) as per https://github.com/JuliaDynamics/Agents.jl/issues/727
     properties = Dict(
+        :events => events,
         :fully_grown => falses(dims),
         :countdown => zeros(Int, dims),
         :regrowth_time => regrowth_time,
@@ -207,9 +209,10 @@ function initialize_model(;
         :wolf_perception => wolf_perception
     )
     model = StandardABM(Union{Sheep, Wolf}, space; 
-        agent_step! = sheepwolf_step!, model_step! = grass_step!,
+        agent_step! = sheepwolf_step!, model_step! = custom_model_step!,
         properties, rng, scheduler = Schedulers.Randomly(), warn = false
     )
+    
     ## Add agents
     for _ in 1:n_sheep
         energy = rand(abmrng(model), 1:(Δenergy_sheep*2)) - 1
@@ -260,6 +263,11 @@ function sheepwolf_step!(wolf::Wolf, model)
     reproduce!(wolf, model)
 end
 
+function custom_model_step!(model)
+    event_handler!(model)
+    grass_step!(model)
+end
+
 # The behavior of grass function differently. If it is fully grown, it is consumable.
 # Otherwise, it cannot be consumed until it regrows after a delay specified by
 # `regrowth_time`. The dynamics of the grass is our `model_step!` function.
@@ -275,3 +283,67 @@ function grass_step!(model)
         end
     end
 end
+
+# Check current step and start event at step t
+function event_handler!(model)
+    
+    for event in model.events
+        if event.timer == event.t_start # start event
+            if event.name == "Drought"
+                model.regrowth_time = event.value
+                model.wolf_perception += 1
+                model.sheep_perception += 1
+
+            elseif event.name == "Flood"
+                model.regrowth_time = event.value
+                model.Δenergy_wolf = model.Δenergy_wolf - 1
+                model.Δenergy_sheep = model.Δenergy_sheep - 1
+            
+            elseif event.name == "PreyReproduceSeasonal"
+                model.sheep_reproduce = event.value
+            
+            elseif event.name == "PredatorReproduceSeasonal"
+                model.wolf_reproduce = event.value
+
+            end
+        end
+
+        if event.timer == event.t_end # end event
+            if event.name == "Drought"
+                model.regrowth_time = event.pre_value
+                model.wolf_perception -= 1
+                model.sheep_perception -= 1
+
+            elseif event.name == "Flood"
+                model.regrowth_time = event.pre_value
+                model.Δenergy_wolf = model.Δenergy_wolf + 1
+                model.Δenergy_sheep = model.Δenergy_sheep + 1
+            
+            elseif event.name == "PreyReproduceSeasonal"
+                model.sheep_reproduce = event.pre_value
+            
+            elseif event.name == "PredatorReproduceSeasonal"
+                model.wolf_reproduce = event.pre_value
+
+            end
+        end
+
+        if event.timer == event.t_cycle # reset cycle
+            event.timer = 1
+        else
+            event.timer += 1
+        end
+    end
+end
+
+
+mutable struct RecurringEvent
+    name::String
+    value::Float64
+    pre_value::Float64
+    t_start::Int64
+    t_end::Int64
+    t_cycle::Int64
+    timer::Int64
+end
+
