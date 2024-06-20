@@ -5,6 +5,7 @@ using Agents, Random, GLMakie
     Predation
 end
 mutable struct AnimalDefinition
+    n::Int32
     symbol::Char
     color::GLMakie.ColorTypes.RGBA{Float32}
     energy_threshold::Float64
@@ -19,10 +20,6 @@ reproduction_prop(a) = abmproperties(model)[Symbol(a.def.type*"_"*"reproduction_
 Δenergy(a) = abmproperties(model)[Symbol(a.def.type*"_"*"Δenergy")]
 perception(a) = abmproperties(model)[Symbol(a.def.type*"_"*"perception")]
 energy_threshold(a) = abmproperties(model)[Symbol(a.def.type*"_"*"energy_threshold")]
-struct StartDefinition
-    n::Int32
-    def::AnimalDefinition
-end
 #might be better to use @multiagent and @subagent with predator prey as subtypes. Allows to dispatch different functions per kind and change execution order with schedulers.bykind
 @agent struct Animal(GridAgent{2})
     energy::Float64
@@ -178,19 +175,13 @@ end
 
 function initialize_model(;
         events = [],
-        start_defs = [
-            StartDefinition(100,AnimalDefinition('●',RGBAf(1.0, 1.0, 1.0, 0.8),20, 0.3, 6, 1, "Sheep", ["Wolf"], ["Grass"])),
-            StartDefinition(20,AnimalDefinition('▲',RGBAf(0.2, 0.2, 0.3, 0.8),20, 0.07, 20, 1, "Wolf", [], ["Sheep"]))
+        animal_defs = [
+            AnimalDefinition(100,'●',RGBAf(1.0, 1.0, 1.0, 0.8),20, 0.3, 6, 1, "Sheep", ["Wolf"], ["Grass"]),
+            AnimalDefinition(20,'▲',RGBAf(0.2, 0.2, 0.3, 0.8),20, 0.07, 20, 1, "Wolf", [], ["Sheep"])
         ],
         dims = (20, 20),
         regrowth_time = 30,
-        Δenergy_sheep = 4,
-        Δenergy_wolf = 20,
         Δenergy_grass = 5,
-        sheep_reproduce = 0.04,
-        wolf_reproduce = 0.05,
-        sheep_perception = 0,
-        wolf_perception = 0,
         seed = 23182,
     )
     rng = MersenneTwister(seed)
@@ -199,11 +190,6 @@ function initialize_model(;
     ## and the time to regrow. Also have static parameter `regrowth_time`.
     ## Notice how the properties are a `NamedTuple` to ensure type stability.
     ## define as dictionary(mutable) instead of tuples(immutable) as per https://github.com/JuliaDynamics/Agents.jl/issues/727
-    ## maybe instead of AnimalDefinition we build the properties dict dynamically and use model properties during the simulation
-    animal_defs = Vector{AnimalDefinition}()
-    for start_def in start_defs
-        push!(animal_defs,start_def.def)
-    end
     animal_properties = generate_animal_parameters(animal_defs)
     model_properties = Dict(
         :events => events,
@@ -217,10 +203,10 @@ function initialize_model(;
         agent_step! = animal_step!, model_step! = model_step!,
         properties, rng, scheduler = Schedulers.Randomly(), warn = false, agents_first = false
     )
-    for start_def in start_defs
-        for _ in 1:start_def.n
-            energy = rand(abmrng(model), 1:(start_def.def.Δenergy*2)) - 1
-            add_agent!(Animal, model, energy, start_def.def, nothing, [], [], [], [])
+    for def in animal_defs
+        for _ in 1:def.n
+            energy = rand(abmrng(model), 1:(def.Δenergy*2)) - 1
+            add_agent!(Animal, model, energy, def, nothing, [], [], [], [])
         end
     end
     ## Add grass with random initial growth
