@@ -30,14 +30,16 @@ end
     death_cause::Union{DeathCause,Nothing}
     nearby_dangers
     nearby_food
+    food_scores
+    danger_scores
 end
 
 
 function perceive!(a::Animal,model)
     if perception(a) > 0
         nearby = collect(nearby_agents(a, model, perception(a)))
-        a.nearby_dangers = map(x -> x.pos, filter(x -> isa(x, Animal) && x.def.type ∈ a.def.dangers && isnothing(x.death_cause), nearby))
-        a.nearby_food = map(x -> x.pos, filter(x -> isa(x, Animal) && x.def.type ∈ a.def.food && isnothing(x.death_cause), nearby))
+        a.nearby_dangers = map(x -> x.pos, filter(x -> isa(x, Animal) && x.def.type ∈ a.def.dangers, nearby))
+        a.nearby_food = map(x -> x.pos, filter(x -> isa(x, Animal) && x.def.type ∈ a.def.food, nearby))
         if "Grass" ∈ a.def.food
             a.nearby_food = [a.nearby_food; nearby_fully_grown(a, model)]
         end
@@ -64,22 +66,36 @@ function calculate_best_pos(a::Animal,model)
     positions = collect(nearby_positions(a, model, 1))
     # weight scores with utility functions
     for pos in positions
-        if !isempty(a.nearby_dangers)
-            danger_score = sum(map(danger -> findmax(abs.(pos.-danger))[1], a.nearby_dangers))
-            push!(danger_scores,danger_score)
+        danger_score = 0
+        for danger in a.nearby_dangers
+            distance = findmax(abs.(pos.-danger))[1]
+            if distance != 0
+                danger_score=danger_score-1/distance
+            else
+                danger_score-=2
+            end
         end
-        if !isempty(a.nearby_food)
-            food_score = sum(map(food -> findmax(abs.(pos.-food))[1], a.nearby_food))
-            push!(food_scores,food_score)
+        food_score = 0
+        for food in a.nearby_food
+            distance = findmax(abs.(pos.-food))[1]
+            if distance != 0
+                food_score=food_score+1/distance
+            else
+                food_score+=2
+            end
         end
+        push!(danger_scores,danger_score)
+        push!(food_scores,food_score)
     end
+    a.danger_scores = danger_scores
+    a.food_scores = food_scores
     #findall(==(minimum(x)),x) to find all mins
     #best to filter out all positions where there is already an agent and take into account the current position, so sheeps dont just stand still when the position is occupied
     if !isempty(a.nearby_dangers) #&& a.energy > a.def.energy_threshold  
         safest_position = positions[findmax(danger_scores)[2]]
         return safest_position
     elseif !isempty(a.nearby_food) #&& a.energy < a.def.energy_threshold  
-        foodiest_position = positions[findmin(food_scores)[2]]
+        foodiest_position = positions[findmax(food_scores)[2]]
         return foodiest_position
     else
         return nothing
@@ -106,12 +122,27 @@ function reproduce!(a::Animal, model)
 end
 
 function Agents.agent2string(agent::Animal)
+    food_scores = ""
+    danger_scores = ""
+    f(x) = string(round(x,digits=2))
+    if !isempty(agent.food_scores)
+        food_scores = "\n" * f(agent.food_scores[6]) * "|" * f(agent.food_scores[7]) * "|" * f(agent.food_scores[8]) * "\n" * 
+               f(agent.food_scores[4]) * "|" * "  " * "|" * f(agent.food_scores[5]) * "\n" *
+               f(agent.food_scores[1]) * "|" * f(agent.food_scores[2]) * "|" * f(agent.food_scores[3])
+    end
+    if !isempty(agent.danger_scores)
+        danger_scores = "\n" * f(agent.danger_scores[6]) * "|" * f(agent.danger_scores[7]) * "|" * f(agent.danger_scores[8]) * "\n" * 
+               f(agent.danger_scores[4]) * "|" * "  " * "|" * f(agent.danger_scores[5]) * "\n" *
+               f(agent.danger_scores[1]) * "|" * f(agent.danger_scores[2]) * "|" * f(agent.danger_scores[3])
+    end
     """
     Type = $(agent.def.type)
     ID = $(agent.id)
     energy = $(agent.energy)
     perception = $(agent.def.perception)
     death = $(agent.death_cause)
+    food_scores = $(food_scores)
+    danger_scores = $(danger_scores)
     """
 end
 
@@ -174,14 +205,14 @@ function initialize_model(;
         push!(animal_defs,start_def.def)
     end
     animal_properties = generate_animal_parameters(animal_defs)
-    properties = Dict(
+    model_properties = Dict(
         :events => events,
         :fully_grown => falses(dims),
         :countdown => zeros(Int, dims),
         :regrowth_time => regrowth_time,
         :Δenergy_grass => Δenergy_grass,
     )
-    properties = merge(properties,animal_properties)
+    properties = merge(model_properties,animal_properties)
     model = StandardABM(Animal, space; 
         agent_step! = animal_step!, model_step! = model_step!,
         properties, rng, scheduler = Schedulers.Randomly(), warn = false, agents_first = false
@@ -189,7 +220,7 @@ function initialize_model(;
     for start_def in start_defs
         for _ in 1:start_def.n
             energy = rand(abmrng(model), 1:(start_def.def.Δenergy*2)) - 1
-            add_agent!(Animal, model, energy, start_def.def, nothing, [], [])
+            add_agent!(Animal, model, energy, start_def.def, nothing, [], [], [], [])
         end
     end
     ## Add grass with random initial growth
@@ -217,7 +248,7 @@ function animal_step!(a::Animal, model)
         #remove_agent!(a, model)
         #return
     end
-    perceive!(a, model)
+    #perceive!(a, model)
     move!(a, model)
     if a.energy < 0
         a.death_cause = Starvation
@@ -238,8 +269,12 @@ end
 function grass_step!(model)
     ids = collect(allids(model))
     dead_animals = filter(id -> !isnothing(model[id].death_cause), ids)
-    for a in dead_animals
-        remove_agent!(a, model)
+    for id in ids
+        if !isnothing(model[id].death_cause)
+            remove_agent!(id, model)
+        else
+            perceive!(model[id], model)
+        end
     end
     @inbounds for p in positions(model) # we don't have to enable bound checking
         if !(model.fully_grown[p...])
@@ -261,25 +296,25 @@ function event_handler!(model)
             if event.name == "Drought"
                 model.regrowth_time = event.value
                 for id in ids
-                    model[id].def.perception += 1
+                    abmproperties(model)[Symbol(model[id].def.type*"_"*"perception")] += 1
                 end
                 
             elseif event.name == "Flood"
                 model.regrowth_time = event.value
                 for id in ids
-                    model[id].def.Δenergy -= 1
+                    abmproperties(model)[Symbol(model[id].def.type*"_"*"Δenergy")] -= 1
                 end
             
             elseif event.name == "PreyReproduceSeasonal"
                 prey = filter(id -> "Grass" ∈ model[id].def.food, ids)
                 for id in prey
-                    model[id].def.reproduction_prob = event.value
+                    abmproperties(model)[Symbol(model[id].def.type*"_"*"reproduction_prob")] = event.value
                 end
             
             elseif event.name == "PredatorReproduceSeasonal"
                 predators = filter(id -> !("Grass" ∈ model[id].def.food), ids)
                 for id in predators
-                    model[id].def.reproduction_prob = event.value
+                    abmproperties(model)[Symbol(model[id].def.type*"_"*"reproduction_prob")] = event.value
                 end
 
             end
@@ -289,25 +324,25 @@ function event_handler!(model)
             if event.name == "Drought"
                 model.regrowth_time = event.pre_value
                 for id in ids
-                    model[id].def.perception -= 1
+                    abmproperties(model)[Symbol(model[id].def.type*"_"*"perception")] -= 1
                 end
 
             elseif event.name == "Flood"
                 model.regrowth_time = event.pre_value
                 for id in ids
-                    model[id].def.Δenergy += 1
+                    abmproperties(model)[Symbol(model[id].def.type*"_"*"Δenergy")] += 1
                 end
             
             elseif event.name == "PreyReproduceSeasonal"
                 prey = filter(id -> "Grass" ∈ model[id].def.food, ids)
                 for id in prey
-                    model[id].def.reproduction_prob = event.pre_value
+                    abmproperties(model)[Symbol(model[id].def.type*"_"*"reproduction_prob")] = event.pre_value
                 end
             
             elseif event.name == "PredatorReproduceSeasonal"
                 predators = filter(id -> !("Grass" ∈ model[id].def.food), ids)
                 for id in predators
-                    model[id].def.reproduction_prob = event.pre_value
+                    abmproperties(model)[Symbol(model[id].def.type*"_"*"reproduction_prob")] = event.pre_value
                 end
 
             end
