@@ -15,6 +15,10 @@ mutable struct AnimalDefinition
     dangers::Vector{String}
     food::Vector{String}
 end
+reproduction_prop(a) = abmproperties(model)[Symbol(a.def.type*"_"*"reproduction_prob")]
+Δenergy(a) = abmproperties(model)[Symbol(a.def.type*"_"*"Δenergy")]
+perception(a) = abmproperties(model)[Symbol(a.def.type*"_"*"perception")]
+energy_threshold(a) = abmproperties(model)[Symbol(a.def.type*"_"*"energy_threshold")]
 struct StartDefinition
     n::Int32
     def::AnimalDefinition
@@ -30,8 +34,8 @@ end
 
 
 function perceive!(a::Animal,model)
-    if a.def.perception > 0
-        nearby = collect(nearby_agents(a, model, a.def.perception))
+    if perception(a) > 0
+        nearby = collect(nearby_agents(a, model, perception(a)))
         a.nearby_dangers = map(x -> x.pos, filter(x -> isa(x, Animal) && x.def.type ∈ a.def.dangers && isnothing(x.death_cause), nearby))
         a.nearby_food = map(x -> x.pos, filter(x -> isa(x, Animal) && x.def.type ∈ a.def.food && isnothing(x.death_cause), nearby))
         if "Grass" ∈ a.def.food
@@ -65,7 +69,7 @@ function calculate_best_pos(a::Animal,model)
             push!(danger_scores,danger_score)
         end
         if !isempty(a.nearby_food)
-            food_score = sum(map(food -> findmax(abs.(pos.-danger))[1], a.nearby_food))
+            food_score = sum(map(food -> findmax(abs.(pos.-food))[1], a.nearby_food))
             push!(food_scores,food_score)
         end
     end
@@ -86,7 +90,7 @@ function eat!(a::Animal, model)
     if !isnothing(prey)
         #remove_agent!(dinner, model)
         prey.death_cause = Predation
-        a.energy += prey.def.Δenergy
+        a.energy += Δenergy(prey)
     end
     if "Grass" ∈ a.def.food && model.fully_grown[a.pos...]
         model.fully_grown[a.pos...] = false
@@ -95,7 +99,7 @@ function eat!(a::Animal, model)
     return
 end
 function reproduce!(a::Animal, model)
-    if a.energy > a.def.energy_threshold && rand(abmrng(model)) ≤ a.def.reproduction_prob
+    if a.energy > energy_threshold(a) && rand(abmrng(model)) ≤ reproduction_prop(a)#a.def.reproduction_prob
         a.energy /= 2
         replicate!(a, model)
     end
@@ -122,7 +126,7 @@ function move_towards!(agent, pos, model; ifempty=true)
     walk!(agent,direction,model; ifempty=ifempty)
 end
 function nearby_fully_grown(a::Animal, model)
-    nearby_pos = nearby_positions(a.pos, model, a.def.perception)
+    nearby_pos = nearby_positions(a.pos, model, perception(a))
     fully_grown_positions = filter(x -> model.fully_grown[x...], collect(nearby_pos))
     return fully_grown_positions
 end
@@ -165,19 +169,19 @@ function initialize_model(;
     ## Notice how the properties are a `NamedTuple` to ensure type stability.
     ## define as dictionary(mutable) instead of tuples(immutable) as per https://github.com/JuliaDynamics/Agents.jl/issues/727
     ## maybe instead of AnimalDefinition we build the properties dict dynamically and use model properties during the simulation
+    animal_defs = Vector{AnimalDefinition}()
+    for start_def in start_defs
+        push!(animal_defs,start_def.def)
+    end
+    animal_properties = generate_animal_parameters(animal_defs)
     properties = Dict(
         :events => events,
         :fully_grown => falses(dims),
         :countdown => zeros(Int, dims),
         :regrowth_time => regrowth_time,
-        :Δenergy_sheep => Δenergy_sheep,
-        :Δenergy_wolf => Δenergy_wolf,
         :Δenergy_grass => Δenergy_grass,
-        :sheep_reproduce => sheep_reproduce,
-        :wolf_reproduce => wolf_reproduce,
-        :sheep_perception => sheep_perception,
-        :wolf_perception => wolf_perception
     )
+    properties = merge(properties,animal_properties)
     model = StandardABM(Animal, space; 
         agent_step! = animal_step!, model_step! = model_step!,
         properties, rng, scheduler = Schedulers.Randomly(), warn = false, agents_first = false
@@ -315,6 +319,28 @@ function event_handler!(model)
             event.timer += 1
         end
     end
+end
+
+function generate_animal_parameters(defs::Vector{AnimalDefinition})
+    parameter_dict = Dict()
+    for def in defs
+        parameter_dict[Symbol(def.type*"_"*"Δenergy")]=def.Δenergy
+        parameter_dict[Symbol(def.type*"_"*"reproduction_prob")]=def.reproduction_prob
+        parameter_dict[Symbol(def.type*"_"*"perception")]=def.perception
+        parameter_dict[Symbol(def.type*"_"*"energy_threshold")]=def.energy_threshold
+    end
+    return parameter_dict
+end
+
+function generate_animal_parameter_ranges(defs::Vector{AnimalDefinition})
+    parameter_range_dict = Dict()
+    for def in defs
+        parameter_range_dict[Symbol(def.type*"_"*"Δenergy")]=0:1:100
+        parameter_range_dict[Symbol(def.type*"_"*"reproduction_prob")]=0:0.01:1
+        parameter_range_dict[Symbol(def.type*"_"*"perception")]=0:1:10
+        parameter_range_dict[Symbol(def.type*"_"*"energy_threshold")]=0:1:100
+    end
+    return parameter_range_dict
 end
 
 
