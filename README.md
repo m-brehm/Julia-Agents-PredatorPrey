@@ -11,8 +11,8 @@ Es können verschiedene Spezien mit individuellen Paramteren, Fressfeinden und N
 
 **Umweltereignisse -**
 Es können vordefinierte Events konfiguriert werden, die die Parameter der Agenten oder des Modells zyklisch anpassen. Folgende Events wurden implementiert.
-- Dürre: Grass kann austrocknen, Räuber können weiter sehen.
-- Flut: Initiale minderung der Populationen und eine höherer Energieverbrauch der Agenten.
+- Dürre: Grass kann austrocknen und wächst langsamer, Räuber können weiter sehen.
+- Flut: Populationen werden schlagartig reduziert.
 - Winter: Auf einem gewissen Anteil der Felder wächst kein Gras.
-- Saisonale Reproduktion: Anpassung der Reproduktionsraten für Räuber beziehungsweise Raubtiere.
+- Saisonale Reproduktion: Anpassung der Reproduktionsraten für Räuber beziehungsweise Beute.
 
