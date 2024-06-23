@@ -265,9 +265,8 @@ function grass_step!(model)
     end
     @inbounds for p in positions(model) # we don't have to enable bound checking
         if !(model.fully_grown[p...])
-            if model.growth[p...] ≥ model.regrowth_time#≤ 0
+            if model.growth[p...] ≥ model.regrowth_time
                 model.fully_grown[p...] = true
-                #model.growth[p...] = model.regrowth_time
             else
                 model.growth[p...] += 1
             end
@@ -280,7 +279,7 @@ function handle_event!(model)
     for event in model.events
         if event.timer == event.t_start # start event
             if event.name == "Drought"
-                #model.regrowth_time = event.value
+                model.regrowth_time = event.value
 
                 predators = filter(id -> !("Grass" ∈ model[id].def.food), ids)
                 for id in predators
@@ -288,11 +287,19 @@ function handle_event!(model)
                 end
                 
             elseif event.name == "Flood"
-                model.regrowth_time = event.value
+                flood_kill_chance = event.value
                 for id in ids
-                    abmproperties(model)[Symbol(model[id].def.type*"_"*"Δenergy")] -= 1
+                    if (flood_kill_chance ≥ rand(abmrng(model)))
+                        remove_agent!(model[id], model)
+                    end
                 end
-            
+
+                for p in positions(model)
+                    if model.fully_grown[p...]
+                        model.growth[p...] = 0
+                        model.fully_grown[p...] = false
+                    end
+                end
             
             elseif event.name == "PreyReproduceSeasonal"
                 prey = filter(id -> "Grass" ∈ model[id].def.food, ids)
@@ -314,7 +321,6 @@ function handle_event!(model)
                 for p in positions(model)
                     dry_out_chance = 0.4 * (model.growth[p...] / model.regrowth_time)
                     if model.fully_grown[p...] && (dry_out_chance ≥ rand(abmrng(model))) 
-                        #model.growth[p...] = 0
                         model.growth[p...] = rand(abmrng(model), 1:model.regrowth_time) - 1
                         model.fully_grown[p...] = false
                     end
@@ -324,7 +330,7 @@ function handle_event!(model)
                 i = 1
                 for p in positions(model)
                     if i % block_field_every == 0
-                        model.growth[p...] = rand(abmrng(model), 1:(model.regrowth_time / 2))
+                        model.growth[p...] = 0
                         model.fully_grown[p...] = false
                     end
                     i += 1
@@ -336,16 +342,21 @@ function handle_event!(model)
 
         if event.timer == event.t_end # end event
             if event.name == "Drought"
-                #model.regrowth_time = event.pre_value
+                model.regrowth_time = event.pre_value
                 predators = filter(id -> !("Grass" ∈ model[id].def.food), ids)
                 for id in predators
                     abmproperties(model)[Symbol(model[id].def.type*"_"*"perception")] = 1
-                end
+                end 
 
-            elseif event.name == "Flood"
-                model.regrowth_time = event.pre_value
-                for id in ids
-                    abmproperties(model)[Symbol(model[id].def.type*"_"*"Δenergy")] += 1
+            elseif event.name == "Winter" 
+                adjust_field_every = 2
+                i = 1
+                for p in positions(model)
+                    if i % adjust_field_every == 0
+                        model.growth[p...] = rand(abmrng(model), 1:(model.regrowth_time))
+                        model.fully_grown[p...] = false
+                    end
+                    i += 1
                 end
             
             elseif event.name == "PreyReproduceSeasonal"
