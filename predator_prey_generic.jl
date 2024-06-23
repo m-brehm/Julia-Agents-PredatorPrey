@@ -107,6 +107,7 @@ function eat!(a::Animal, model)
     end
     if "Grass" ∈ a.def.food && model.fully_grown[a.pos...]
         model.fully_grown[a.pos...] = false
+        model.growth[a.pos...] = 0
         a.energy += model.Δenergy_grass
     end
     return
@@ -194,7 +195,7 @@ function initialize_model(;
     model_properties = Dict(
         :events => events,
         :fully_grown => falses(dims),
-        :countdown => zeros(Int, dims),
+        :growth => zeros(Int, dims),
         :regrowth_time => regrowth_time,
         :Δenergy_grass => Δenergy_grass,
     )
@@ -212,8 +213,8 @@ function initialize_model(;
     ## Add grass with random initial growth
     for p in positions(model)
         fully_grown = rand(abmrng(model), Bool)
-        countdown = fully_grown ? regrowth_time : rand(abmrng(model), 1:regrowth_time) - 1
-        model.countdown[p...] = countdown
+        growth = fully_grown ? regrowth_time : rand(abmrng(model), 1:regrowth_time) - 1
+        model.growth[p...] = growth
         model.fully_grown[p...] = fully_grown
     end
     return model
@@ -245,7 +246,7 @@ function animal_step!(a::Animal, model)
 end
 
 function model_step!(model)
-    event_handler!(model)
+    handle_event!(model)
     grass_step!(model)
 end
 
@@ -264,25 +265,26 @@ function grass_step!(model)
     end
     @inbounds for p in positions(model) # we don't have to enable bound checking
         if !(model.fully_grown[p...])
-            if model.countdown[p...] ≤ 0
+            if model.growth[p...] ≥ model.regrowth_time#≤ 0
                 model.fully_grown[p...] = true
-                model.countdown[p...] = model.regrowth_time
+                #model.growth[p...] = model.regrowth_time
             else
-                model.countdown[p...] -= 1
+                model.growth[p...] += 1
             end
         end
     end
 end
 
-# Check current step and start event at step t
-function event_handler!(model)
+function handle_event!(model)
     ids = collect(allids(model))
     for event in model.events
         if event.timer == event.t_start # start event
             if event.name == "Drought"
-                model.regrowth_time = event.value
-                for id in ids
-                    abmproperties(model)[Symbol(model[id].def.type*"_"*"perception")] += 1
+                #model.regrowth_time = event.value
+
+                predators = filter(id -> !("Grass" ∈ model[id].def.food), ids)
+                for id in predators
+                    abmproperties(model)[Symbol(model[id].def.type*"_"*"perception")] = 2
                 end
                 
             elseif event.name == "Flood"
@@ -290,6 +292,7 @@ function event_handler!(model)
                 for id in ids
                     abmproperties(model)[Symbol(model[id].def.type*"_"*"Δenergy")] -= 1
                 end
+            
             
             elseif event.name == "PreyReproduceSeasonal"
                 prey = filter(id -> "Grass" ∈ model[id].def.food, ids)
@@ -306,11 +309,37 @@ function event_handler!(model)
             end
         end
 
+        if (event.timer ≥ event.t_start) && (event.timer < event.t_end)
+            if event.name == "Drought"
+                for p in positions(model)
+                    dry_out_chance = 0.4 * (model.growth[p...] / model.regrowth_time)
+                    if model.fully_grown[p...] && (dry_out_chance ≥ rand(abmrng(model))) 
+                        #model.growth[p...] = 0
+                        model.growth[p...] = rand(abmrng(model), 1:model.regrowth_time) - 1
+                        model.fully_grown[p...] = false
+                    end
+                end
+            elseif event.name == "Winter" 
+                block_field_every = 2
+                i = 1
+                for p in positions(model)
+                    if i % block_field_every == 0
+                        model.growth[p...] = rand(abmrng(model), 1:(model.regrowth_time / 2))
+                        model.fully_grown[p...] = false
+                    end
+                    i += 1
+                end
+                
+            end
+        end
+
+
         if event.timer == event.t_end # end event
             if event.name == "Drought"
-                model.regrowth_time = event.pre_value
-                for id in ids
-                    abmproperties(model)[Symbol(model[id].def.type*"_"*"perception")] -= 1
+                #model.regrowth_time = event.pre_value
+                predators = filter(id -> !("Grass" ∈ model[id].def.food), ids)
+                for id in predators
+                    abmproperties(model)[Symbol(model[id].def.type*"_"*"perception")] = 1
                 end
 
             elseif event.name == "Flood"
@@ -334,9 +363,9 @@ function event_handler!(model)
             end
         end
 
-        if event.timer == event.t_cycle # reset cycle
-            event.timer = 1
-        else
+        if event.timer == event.t_cycle # reset timer
+            event.timer = 0
+        else # continue timer
             event.timer += 1
         end
     end
