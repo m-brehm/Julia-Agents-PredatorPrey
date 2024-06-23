@@ -1,14 +1,19 @@
 using Agents, Random, GLMakie
 
+# needed to check why the prey dies
 @enum DeathCause begin
     Starvation
     Predation
 end
+
+# for defining animals. most of the fields dont get used directly, but converted to model parameters to change them in GLMakie
 mutable struct AnimalDefinition
     n::Int32
     symbol::Char
     color::GLMakie.ColorTypes.RGBA{Float32}
-    energy_threshold::Float64
+    reproduction_energy_threshold::Int32
+    forage_energy_threshold::Int32
+    energy_usage::Int32
     reproduction_prob::Float64
     Δenergy::Float64
     perception::Int32
@@ -16,22 +21,27 @@ mutable struct AnimalDefinition
     dangers::Vector{String}
     food::Vector{String}
 end
+
+# some helper functions to get generated model parameters for animals 
 reproduction_prop(a) = abmproperties(model)[Symbol(a.def.type*"_"*"reproduction_prob")]
 Δenergy(a) = abmproperties(model)[Symbol(a.def.type*"_"*"Δenergy")]
 perception(a) = abmproperties(model)[Symbol(a.def.type*"_"*"perception")]
-energy_threshold(a) = abmproperties(model)[Symbol(a.def.type*"_"*"energy_threshold")]
-#might be better to use @multiagent and @subagent with predator prey as subtypes. Allows to dispatch different functions per kind and change execution order with schedulers.bykind
+reproduction_energy_threshold(a) = abmproperties(model)[Symbol(a.def.type*"_"*"reproduction_energy_threshold")]
+forage_energy_threshold(a) = abmproperties(model)[Symbol(a.def.type*"_"*"forage_energy_threshold")]
+energy_usage(a) = abmproperties(model)[Symbol(a.def.type*"_"*"energy_usage")]
+
+# Animal with AnimalDefinition and fields that change during simulation
+# might be better to use @multiagent and @subagent with predator prey as subtypes. Allows to dispatch different functions per kind and change execution order with schedulers.bykind
 @agent struct Animal(GridAgent{2})
     energy::Float64
     def::AnimalDefinition
     death_cause::Union{DeathCause,Nothing}
     nearby_dangers
     nearby_food
-    food_scores
-    danger_scores
+    scores
 end
 
-
+# get nearby food and danger for later when choosing the next position
 function perceive!(a::Animal,model)
     if perception(a) > 0
         nearby = collect(nearby_agents(a, model, perception(a)))
@@ -42,62 +52,56 @@ function perceive!(a::Animal,model)
         end
     end
 end
+
+# move the animal and subtract energy
 function move!(a::Animal,model)
-    best_pos = calculate_best_pos(a,model)
+    best_pos = choose_position(a,model)
     if !isnothing(best_pos)
-        #make sure predators can step on cells with prey by setting ifempty to false
+        #make sure predators can step on cells with prey, but prey cannot step on other prey
         ids = ids_in_position(best_pos, model)
         if !isempty(ids) && model[first(ids)].def.type ∈ a.def.food
-            move_towards!(a, best_pos, model; ifempty = false)
-        else
-            move_towards!(a, best_pos, model)
+            move_agent!(a, best_pos, model)
+        elseif isempty(best_pos, model)
+            move_agent!(a, best_pos, model)
         end
     else
         randomwalk!(a, model)
     end
-    a.energy -= 1
+    a.energy -= energy_usage(a)
 end
-function calculate_best_pos(a::Animal,model)
-    danger_scores = []
-    food_scores = []
-    positions = collect(nearby_positions(a, model, 1))
-    # weight scores with utility functions
+
+# choose best position based on scoring
+# could have also used the AStar pathfinding from Agents.jl with custom cost_function, but this seemed easier
+function choose_position(a::Animal,model)
+    scores = []
+    positions = push!(collect(nearby_positions(a, model, 1)),a.pos)
     for pos in positions
-        danger_score = 0
+        score = 0
         for danger in a.nearby_dangers
             distance = findmax(abs.(pos.-danger))[1]
             if distance != 0
-                danger_score=danger_score-1/distance
+                score -= 50/distance
             else
-                danger_score-=2
+                score -= 100
             end
         end
-        food_score = 0
         for food in a.nearby_food
-            distance = findmax(abs.(pos.-food))[1]
-            if distance != 0
-                food_score=food_score+1/distance
-            else
-                food_score+=2
+            if a.energy < forage_energy_threshold(a) 
+                distance = findmax(abs.(pos.-food))[1]
+                if distance != 0
+                    score += 1/distance
+                else
+                    score += 2
+                end
             end
         end
-        push!(danger_scores,danger_score)
-        push!(food_scores,food_score)
+        push!(scores, score)
     end
-    a.danger_scores = danger_scores
-    a.food_scores = food_scores
-    #findall(==(minimum(x)),x) to find all mins
-    #best to filter out all positions where there is already an agent and take into account the current position, so sheeps dont just stand still when the position is occupied
-    if !isempty(a.nearby_dangers) #&& a.energy > a.def.energy_threshold  
-        safest_position = positions[findmax(danger_scores)[2]]
-        return safest_position
-    elseif !isempty(a.nearby_food) #&& a.energy < a.def.energy_threshold  
-        foodiest_position = positions[findmax(food_scores)[2]]
-        return foodiest_position
-    else
-        return nothing
-    end
+    a.scores = scores
+    return positions[rand(abmrng(model), findall(==(maximum(scores)),scores))]
 end
+
+# add energy if predator is on tile with prey, or prey is on tile with grass
 function eat!(a::Animal, model)
     prey = first_prey_in_position(a, model)
     if !isnothing(prey)
@@ -112,38 +116,35 @@ function eat!(a::Animal, model)
     end
     return
 end
+
+# dublicate the animal, based on chance and if it has enough energy
 function reproduce!(a::Animal, model)
-    if a.energy > energy_threshold(a) && rand(abmrng(model)) ≤ reproduction_prop(a)#a.def.reproduction_prob
+    if a.energy > reproduction_energy_threshold(a) && rand(abmrng(model)) ≤ reproduction_prop(a)
         a.energy /= 2
         replicate!(a, model)
     end
 end
 
+# usefull debug information when hovering over animals in GLMakie
 function Agents.agent2string(agent::Animal)
-    food_scores = ""
-    danger_scores = ""
+    scores = ""
     f(x) = string(round(x,digits=2))
-    if !isempty(agent.food_scores)
-        food_scores = "\n" * f(agent.food_scores[6]) * "|" * f(agent.food_scores[7]) * "|" * f(agent.food_scores[8]) * "\n" * 
-               f(agent.food_scores[4]) * "|" * "  " * "|" * f(agent.food_scores[5]) * "\n" *
-               f(agent.food_scores[1]) * "|" * f(agent.food_scores[2]) * "|" * f(agent.food_scores[3])
-    end
-    if !isempty(agent.danger_scores)
-        danger_scores = "\n" * f(agent.danger_scores[6]) * "|" * f(agent.danger_scores[7]) * "|" * f(agent.danger_scores[8]) * "\n" * 
-               f(agent.danger_scores[4]) * "|" * "  " * "|" * f(agent.danger_scores[5]) * "\n" *
-               f(agent.danger_scores[1]) * "|" * f(agent.danger_scores[2]) * "|" * f(agent.danger_scores[3])
+    if !isempty(agent.scores)
+        scores = "\n" * 
+                f(agent.scores[6]) * "|" * f(agent.scores[7]) * "|" * f(agent.scores[8]) * "\n" * 
+                f(agent.scores[4]) * "|" * f(agent.scores[9]) * "|" * f(agent.scores[5]) * "\n" *
+                f(agent.scores[1]) * "|" * f(agent.scores[2]) * "|" * f(agent.scores[3])
     end
     """
     Type = $(agent.def.type)
     ID = $(agent.id)
     energy = $(agent.energy)
-    perception = $(agent.def.perception)
     death = $(agent.death_cause)
-    food_scores = $(food_scores)
-    danger_scores = $(danger_scores)
+    scores = $(scores)
     """
 end
 
+# helper functions
 function move_away!(agent, pos, model)
     direction = agent.pos .- pos
     direction = clamp.(direction,-1,1)
@@ -162,7 +163,7 @@ end
 function random_empty_fully_grown(positions, model)
     n_attempts = 2*length(positions)
     while n_attempts != 0
-        pos_choice = rand(positions)
+        pos_choice = rand(abmrng(model), positions)
         isempty(pos_choice, model) && return pos_choice
         n_attempts -= 1
     end
@@ -177,8 +178,8 @@ end
 function initialize_model(;
         events = [],
         animal_defs = [
-            AnimalDefinition(100,'●',RGBAf(1.0, 1.0, 1.0, 0.8),20, 0.3, 6, 1, "Sheep", ["Wolf"], ["Grass"]),
-            AnimalDefinition(20,'▲',RGBAf(0.2, 0.2, 0.3, 0.8),20, 0.07, 20, 1, "Wolf", [], ["Sheep"])
+            AnimalDefinition(100,'●',RGBAf(1.0, 1.0, 1.0, 0.8),20, 20, 1, 0.3, 6, 1, "Sheep", ["Wolf"], ["Grass"]),
+            AnimalDefinition(20,'▲',RGBAf(0.2, 0.2, 0.3, 0.8),20, 20, 1, 0.07, 20, 1, "Wolf", [], ["Sheep"])
         ],
         dims = (20, 20),
         regrowth_time = 30,
@@ -187,10 +188,7 @@ function initialize_model(;
     )
     rng = MersenneTwister(seed)
     space = GridSpace(dims, periodic = true)
-    ## Model properties contain the grass as two arrays: whether it is fully grown
-    ## and the time to regrow. Also have static parameter `regrowth_time`.
-    ## Notice how the properties are a `NamedTuple` to ensure type stability.
-    ## define as dictionary(mutable) instead of tuples(immutable) as per https://github.com/JuliaDynamics/Agents.jl/issues/727
+    ## Generate model parameters
     animal_properties = generate_animal_parameters(animal_defs)
     model_properties = Dict(
         :events => events,
@@ -200,14 +198,16 @@ function initialize_model(;
         :Δenergy_grass => Δenergy_grass,
     )
     properties = merge(model_properties,animal_properties)
+    ## Initialize model
     model = StandardABM(Animal, space; 
         agent_step! = animal_step!, model_step! = model_step!,
         properties, rng, scheduler = Schedulers.Randomly(), warn = false, agents_first = false
     )
+    ## Add animals
     for def in animal_defs
         for _ in 1:def.n
             energy = rand(abmrng(model), 1:(def.Δenergy*2)) - 1
-            add_agent!(Animal, model, energy, def, nothing, [], [], [], [])
+            add_agent!(Animal, model, energy, def, nothing, [], [], [])
         end
     end
     ## Add grass with random initial growth
@@ -220,21 +220,13 @@ function initialize_model(;
     return model
 end
 
-# ## Defining the stepping functions
-# Sheep and wolves behave similarly:
-# both lose 1 energy unit by moving to an adjacent position and both consume
-# a food source if available. If their energy level is below zero, they die.
-# Otherwise, they live and reproduce with some probability.
-# They move to a random adjacent position with the [`randomwalk!`](@ref) function.
-
-# Notice how the function `sheepwolf_step!`, which is our `agent_step!`,
-# is dispatched to the appropriate agent type via Julia's Multiple Dispatch system.
-
+# Animals move every step and loose energy. If they dont have enough, they die, otherwise they consume energy and reproduce.
+# For fair behaviour we move perception into the model step, so every animal makes its decision on one the same state
 function animal_step!(a::Animal, model)
-    if !isnothing(a.death_cause)
+    #if !isnothing(a.death_cause)
         #remove_agent!(a, model)
         #return
-    end
+    #end
     #perceive!(a, model)
     move!(a, model)
     if a.energy < 0
@@ -248,12 +240,10 @@ end
 function model_step!(model)
     handle_event!(model)
     grass_step!(model)
+    model_animal_step!(model)
 end
 
-# The behavior of grass function differently. If it is fully grown, it is consumable.
-# Otherwise, it cannot be consumed until it regrows after a delay specified by
-# `regrowth_time`. The dynamics of the grass is our `model_step!` function.
-function grass_step!(model)
+function model_animal_step!(model)
     ids = collect(allids(model))
     dead_animals = filter(id -> !isnothing(model[id].death_cause), ids)
     for id in ids
@@ -263,7 +253,10 @@ function grass_step!(model)
             perceive!(model[id], model)
         end
     end
-    @inbounds for p in positions(model) # we don't have to enable bound checking
+end
+
+function grass_step!(model)
+    @inbounds for p in positions(model)
         if !(model.fully_grown[p...])
             if model.growth[p...] ≥ model.regrowth_time
                 model.fully_grown[p...] = true
@@ -275,22 +268,34 @@ function grass_step!(model)
 end
 
 function handle_event!(model)
-    ids = collect(allids(model))
+    agents = collect(allagents(model))
     for event in model.events
         if event.timer == event.t_start # start event
             if event.name == "Drought"
                 model.regrowth_time = event.value
 
-                predators = filter(id -> !("Grass" ∈ model[id].def.food), ids)
-                for id in predators
-                    abmproperties(model)[Symbol(model[id].def.type*"_"*"perception")] = 2
+                predators = filter(a -> !("Grass" ∈ a.def.food), agents)
+                for a in predators
+                    abmproperties(model)[Symbol(a.def.type*"_"*"perception")] = 2
                 end
-                
+            
+            elseif event.name == "PreyReproduceSeasonal"
+                prey = filter(a -> "Grass" ∈ a.def.food, agents)
+                for a in prey
+                    abmproperties(model)[Symbol(a.def.type*"_"*"reproduction_prob")] = event.value
+                end
+            
+            elseif event.name == "PredatorReproduceSeasonal"
+                predators = filter(a -> !("Grass" ∈ a.def.food), agents)
+                for a in predators
+                    abmproperties(model)[Symbol(a.def.type*"_"*"reproduction_prob")] = event.value
+                end
+
             elseif event.name == "Flood"
                 flood_kill_chance = event.value
-                for id in ids
+                for a in agents
                     if (flood_kill_chance ≥ rand(abmrng(model)))
-                        remove_agent!(model[id], model)
+                        remove_agent!(a, model)
                     end
                 end
 
@@ -299,18 +304,6 @@ function handle_event!(model)
                         model.growth[p...] = 0
                         model.fully_grown[p...] = false
                     end
-                end
-            
-            elseif event.name == "PreyReproduceSeasonal"
-                prey = filter(id -> "Grass" ∈ model[id].def.food, ids)
-                for id in prey
-                    abmproperties(model)[Symbol(model[id].def.type*"_"*"reproduction_prob")] = event.value
-                end
-            
-            elseif event.name == "PredatorReproduceSeasonal"
-                predators = filter(id -> !("Grass" ∈ model[id].def.food), ids)
-                for id in predators
-                    abmproperties(model)[Symbol(model[id].def.type*"_"*"reproduction_prob")] = event.value
                 end
 
             end
@@ -343,7 +336,7 @@ function handle_event!(model)
         if event.timer == event.t_end # end event
             if event.name == "Drought"
                 model.regrowth_time = event.pre_value
-                predators = filter(id -> !("Grass" ∈ model[id].def.food), ids)
+                predators = filter(id -> !("Grass" ∈ model[id].def.food), agents)
                 for id in predators
                     abmproperties(model)[Symbol(model[id].def.type*"_"*"perception")] = 1
                 end 
@@ -360,15 +353,15 @@ function handle_event!(model)
                 end
             
             elseif event.name == "PreyReproduceSeasonal"
-                prey = filter(id -> "Grass" ∈ model[id].def.food, ids)
-                for id in prey
-                    abmproperties(model)[Symbol(model[id].def.type*"_"*"reproduction_prob")] = event.pre_value
+                prey = filter(a -> "Grass" ∈ a.def.food, agents)
+                for a in prey
+                    abmproperties(model)[Symbol(a.def.type*"_"*"reproduction_prob")] = event.pre_value
                 end
             
             elseif event.name == "PredatorReproduceSeasonal"
-                predators = filter(id -> !("Grass" ∈ model[id].def.food), ids)
-                for id in predators
-                    abmproperties(model)[Symbol(model[id].def.type*"_"*"reproduction_prob")] = event.pre_value
+                predators = filter(a -> !("Grass" ∈ a.def.food), agents)
+                for a in predators
+                    abmproperties(model)[Symbol(a.def.type*"_"*"reproduction_prob")] = event.pre_value
                 end
 
             end
@@ -388,7 +381,9 @@ function generate_animal_parameters(defs::Vector{AnimalDefinition})
         parameter_dict[Symbol(def.type*"_"*"Δenergy")]=def.Δenergy
         parameter_dict[Symbol(def.type*"_"*"reproduction_prob")]=def.reproduction_prob
         parameter_dict[Symbol(def.type*"_"*"perception")]=def.perception
-        parameter_dict[Symbol(def.type*"_"*"energy_threshold")]=def.energy_threshold
+        parameter_dict[Symbol(def.type*"_"*"forage_energy_threshold")]=def.forage_energy_threshold
+        parameter_dict[Symbol(def.type*"_"*"reproduction_energy_threshold")]=def.reproduction_energy_threshold
+        parameter_dict[Symbol(def.type*"_"*"energy_usage")]=def.energy_usage
     end
     return parameter_dict
 end
@@ -399,7 +394,9 @@ function generate_animal_parameter_ranges(defs::Vector{AnimalDefinition})
         parameter_range_dict[Symbol(def.type*"_"*"Δenergy")]=0:1:100
         parameter_range_dict[Symbol(def.type*"_"*"reproduction_prob")]=0:0.01:1
         parameter_range_dict[Symbol(def.type*"_"*"perception")]=0:1:10
-        parameter_range_dict[Symbol(def.type*"_"*"energy_threshold")]=0:1:100
+        parameter_range_dict[Symbol(def.type*"_"*"forage_energy_threshold")]=0:1:100
+        parameter_range_dict[Symbol(def.type*"_"*"reproduction_energy_threshold")]=0:1:100
+        parameter_range_dict[Symbol(def.type*"_"*"energy_usage")]=0:1:10
     end
     return parameter_range_dict
 end
