@@ -336,9 +336,9 @@ function handle_event!(model)
         if event.timer == event.t_end # end event
             if event.name == "Drought"
                 model.regrowth_time = event.pre_value
-                predators = filter(id -> !("Grass" ∈ model[id].def.food), agents)
-                for id in predators
-                    abmproperties(model)[Symbol(model[id].def.type*"_"*"perception")] = 1
+                predators = filter(a -> !("Grass" ∈ a.def.food), agents)
+                for a in predators
+                    abmproperties(model)[Symbol(a.def.type*"_"*"perception")] = 1
                 end 
 
             elseif event.name == "Winter" 
