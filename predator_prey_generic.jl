@@ -23,17 +23,19 @@ mutable struct AnimalDefinition
 end
 
 # some helper functions to get generated model parameters for animals 
-reproduction_prop(a) = abmproperties(model)[Symbol(a.def.type*"_"*"reproduction_prob")]
-Δenergy(a) = abmproperties(model)[Symbol(a.def.type*"_"*"Δenergy")]
-perception(a) = abmproperties(model)[Symbol(a.def.type*"_"*"perception")]
-reproduction_energy_threshold(a) = abmproperties(model)[Symbol(a.def.type*"_"*"reproduction_energy_threshold")]
-forage_energy_threshold(a) = abmproperties(model)[Symbol(a.def.type*"_"*"forage_energy_threshold")]
-energy_usage(a) = abmproperties(model)[Symbol(a.def.type*"_"*"energy_usage")]
+reproduction_prop(a, model) = abmproperties(model)[Symbol(a.def.type*"_"*"reproduction_prob")]
+Δenergy(a, model) = abmproperties(model)[Symbol(a.def.type*"_"*"Δenergy")]
+perception(a, model) = abmproperties(model)[Symbol(a.def.type*"_"*"perception")]
+reproduction_energy_threshold(a, model) = abmproperties(model)[Symbol(a.def.type*"_"*"reproduction_energy_threshold")]
+forage_energy_threshold(a, model) = abmproperties(model)[Symbol(a.def.type*"_"*"forage_energy_threshold")]
+energy_usage(a, model) = abmproperties(model)[Symbol(a.def.type*"_"*"energy_usage")]
 
 # Animal with AnimalDefinition and fields that change during simulation
 # might be better to use @multiagent and @subagent with predator prey as subtypes. Allows to dispatch different functions per kind and change execution order with schedulers.bykind
 @agent struct Animal(GridAgent{2})
     energy::Float64
+    color::GLMakie.ColorTypes.RGBA{Float32}
+    symbol::Char
     def::AnimalDefinition
     death_cause::Union{DeathCause,Nothing}
     nearby_dangers
@@ -43,8 +45,8 @@ end
 
 # get nearby food and danger for later when choosing the next position
 function perceive!(a::Animal,model)
-    if perception(a) > 0
-        nearby = collect(nearby_agents(a, model, perception(a)))
+    if perception(a, model) > 0
+        nearby = collect(nearby_agents(a, model, perception(a, model)))
         a.nearby_dangers = map(x -> x.pos, filter(x -> isa(x, Animal) && x.def.type ∈ a.def.dangers, nearby))
         a.nearby_food = map(x -> x.pos, filter(x -> isa(x, Animal) && x.def.type ∈ a.def.food, nearby))
         if "Grass" ∈ a.def.food
@@ -67,7 +69,7 @@ function move!(a::Animal,model)
     else
         randomwalk!(a, model)
     end
-    a.energy -= energy_usage(a)
+    a.energy -= energy_usage(a, model)
 end
 
 # choose best position based on scoring
@@ -86,7 +88,7 @@ function choose_position(a::Animal,model)
             end
         end
         for food in a.nearby_food
-            if a.energy < forage_energy_threshold(a) 
+            if a.energy < forage_energy_threshold(a, model) 
                 distance = findmax(abs.(pos.-food))[1]
                 if distance != 0
                     score += 1/distance
@@ -107,7 +109,8 @@ function eat!(a::Animal, model)
     if !isnothing(prey)
         #remove_agent!(dinner, model)
         prey.death_cause = Predation
-        a.energy += Δenergy(prey)
+        prey.symbol = 'x'
+        a.energy += Δenergy(prey, model)
     end
     if "Grass" ∈ a.def.food && model.fully_grown[a.pos...]
         model.fully_grown[a.pos...] = false
@@ -119,7 +122,7 @@ end
 
 # dublicate the animal, based on chance and if it has enough energy
 function reproduce!(a::Animal, model)
-    if a.energy > reproduction_energy_threshold(a) && rand(abmrng(model)) ≤ reproduction_prop(a)
+    if a.energy > reproduction_energy_threshold(a, model) && rand(abmrng(model)) ≤ reproduction_prop(a, model)
         a.energy /= 2
         replicate!(a, model)
     end
@@ -156,7 +159,7 @@ function move_towards!(agent, pos, model; ifempty=true)
     walk!(agent,direction,model; ifempty=ifempty)
 end
 function nearby_fully_grown(a::Animal, model)
-    nearby_pos = nearby_positions(a.pos, model, perception(a))
+    nearby_pos = nearby_positions(a.pos, model, perception(a, model))
     fully_grown_positions = filter(x -> model.fully_grown[x...], collect(nearby_pos))
     return fully_grown_positions
 end
@@ -207,7 +210,7 @@ function initialize_model(;
     for def in animal_defs
         for _ in 1:def.n
             energy = rand(abmrng(model), 1:(def.Δenergy*2)) - 1
-            add_agent!(Animal, model, energy, def, nothing, [], [], [])
+            add_agent!(Animal, model, energy, def.color, def.symbol, def, nothing, [], [], [])
         end
     end
     ## Add grass with random initial growth
@@ -231,10 +234,16 @@ function animal_step!(a::Animal, model)
     move!(a, model)
     if a.energy < 0
         a.death_cause = Starvation
+        a.symbol = 'x'
         return
     end
     eat!(a, model)
     reproduce!(a, model)
+    #if a.energy < 10 && a.def.type != "Wolf"
+    #    a.color = RGBAf(a.energy/10,a.energy/10,a.energy/10,1)
+    #elseif a.def.type != "Wolf"
+    #    a.color = RGBAf(1,1,1,1)
+    #end
 end
 
 function model_step!(model)
